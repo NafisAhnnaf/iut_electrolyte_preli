@@ -35,19 +35,19 @@ class HourInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     hour: int = Field(ge=0, le=23)
-    demand_kwh: float = Field(ge=0)
-    solar_kwh: float = Field(ge=0)
-    tariff_bdt_per_kwh: float = Field(ge=0)
+    demand_kwh: float = Field(ge=0, allow_inf_nan=False)
+    solar_kwh: float = Field(ge=0, allow_inf_nan=False)
+    tariff_bdt_per_kwh: float = Field(ge=0, allow_inf_nan=False)
 
 
 class Battery(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    capacity_kwh: float = Field(gt=0)
-    initial_energy_kwh: float = Field(ge=0)
-    minimum_energy_kwh: float = Field(ge=0)
-    max_charge_kwh_per_hour: float = Field(ge=0)
-    max_discharge_kwh_per_hour: float = Field(ge=0)
+    capacity_kwh: float = Field(gt=0, allow_inf_nan=False)
+    initial_energy_kwh: float = Field(ge=0, allow_inf_nan=False)
+    minimum_energy_kwh: float = Field(ge=0, allow_inf_nan=False)
+    max_charge_kwh_per_hour: float = Field(ge=0, allow_inf_nan=False)
+    max_discharge_kwh_per_hour: float = Field(ge=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _consistent(self) -> "Battery":
