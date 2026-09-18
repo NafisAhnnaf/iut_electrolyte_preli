@@ -165,6 +165,10 @@ async def interpret_notes(operator_notes: list[str]) -> list[dict]:
     Tries the real LLM (1 retry on failure), then falls back to a keyword
     classifier as an emergency degraded mode. Never raises.
     """
+    if not LLM_API_KEY:
+        logger.warning("LLM_API_KEY is not set; using keyword fallback")
+        return _keyword_fallback(operator_notes)
+
     user_message = _build_user_message(operator_notes)
     last_error = ""
     for attempt, timeout in enumerate(LLM_ATTEMPT_TIMEOUT_SECONDS):
