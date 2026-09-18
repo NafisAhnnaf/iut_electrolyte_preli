@@ -1,0 +1,9 @@
+.env
+.env*
+.venv
+__pycache__
+*.pyc
+.git
+.gitignore
+gridwise-llm-preli/.env
+gridwise-llm-preli/.venv

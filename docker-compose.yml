@@ -1,0 +1,23 @@
+services:
+  gridwise-api:
+    container_name: gridwise-api
+    image: nfs996/iut-electrolyte-preli:v1
+    build:
+      context: ./gridwise-llm-preli
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - .env
+    environment:
+      - PORT=${PORT:-8000}
+      - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.5-flash-lite}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8000}/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

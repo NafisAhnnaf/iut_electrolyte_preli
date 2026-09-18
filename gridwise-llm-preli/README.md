@@ -98,10 +98,14 @@ Expected result: a PASS table ending `.../... checks passed`, exit code 0. Addit
 
 ## Docker fallback
 
+- **Registry Reference:** `nfs996/iut-electrolyte-preli:v1`
+- **Digest:** `sha256:74ea68c6f0677524d1d55e6407c33c8e0f6d9357dda84284e26e2a1e50691c43`
+
 ```bash
-docker pull <registry>/gridwise-llm-preli:v1        # exact tag as submitted
-docker run -p 8000:8000 -e LLM_API_KEY=<your key> <registry>/gridwise-llm-preli:v1
+docker pull nfs996/iut-electrolyte-preli:v1
+docker run -d --name gridwise-fallback -p 8000:8000 -e LLM_API_KEY=<your key> nfs996/iut-electrolyte-preli:v1
 curl http://localhost:8000/health
+# {"status":"ok"}
 ```
 
 The image binds `0.0.0.0`, exposes port 8000 (override with `-e PORT=...`), and contains
