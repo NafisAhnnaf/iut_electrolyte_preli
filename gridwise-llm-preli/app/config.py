@@ -38,8 +38,18 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GEMINI_API_KEY", 
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-3.5-flash-lite")
 PORT = int(os.environ.get("PORT", "8000"))
 
-# Per-attempt LLM timeouts: first try, then retry. 12 + 0.5 (backoff) + 8 keeps the
-# worst case near 20.5 s — safely inside the judge's 30 s per-request hard timeout,
-# with time to spare for the keyword fallback + LP solve (~5 ms).
-LLM_ATTEMPT_TIMEOUT_SECONDS = (12.0, 8.0)
+# Per-attempt LLM timeouts: up to 3 tries. 7+7+7 = 21s of network time, leaving
+# room for backoff sleeps between attempts while staying under the judge's 30s
+# per-request hard timeout (with margin for guardrails + LP solve, ~5ms).
+LLM_ATTEMPT_TIMEOUT_SECONDS = (7.0, 7.0, 7.0)
+
+# Total wall-clock budget for the whole interpret_notes() call (network time +
+# backoff sleeps). Kept below the 30s hard timeout so main.py/guardrails/optimize
+# always have time to run afterward.
+LLM_TOTAL_BUDGET_SECONDS = 26.0
+
+# Fallback backoff (used only when the provider gives no retry hint): exponential
+# with jitter, capped so a single sleep can't eat the whole remaining budget.
+LLM_BACKOFF_BASE_SECONDS = 1.0
+LLM_BACKOFF_MAX_SECONDS = 8.0
 
