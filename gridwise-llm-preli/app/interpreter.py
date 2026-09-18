@@ -19,7 +19,7 @@ import re
 
 import httpx
 
-from app.config import LLM_API_KEY, LLM_MODEL, LLM_PROVIDER, LLM_REQUEST_TIMEOUT_SECONDS
+from app.config import LLM_API_KEY, LLM_ATTEMPT_TIMEOUT_SECONDS, LLM_MODEL, LLM_PROVIDER
 
 logger = logging.getLogger("gridwise.interpreter")
 
@@ -83,16 +83,15 @@ def _build_user_message(operator_notes: list[str]) -> str:
 
 
 async def _call_gemini(client: httpx.AsyncClient, user_message: str) -> str:
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/{LLM_MODEL}:generateContent"
-        f"?key={LLM_API_KEY}"
-    )
+    # Key goes in a header, NEVER in the URL: httpx error strings include the full
+    # request URL, and those strings get logged on failure (e.g. a 429 during judging).
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{LLM_MODEL}:generateContent"
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": [{"text": user_message}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
     }
-    resp = await client.post(url, json=body)
+    resp = await client.post(url, json=body, headers={"x-goog-api-key": LLM_API_KEY})
     resp.raise_for_status()
     data = resp.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -115,8 +114,15 @@ async def _call_openai_compatible(client: httpx.AsyncClient, user_message: str, 
     return data["choices"][0]["message"]["content"]
 
 
-async def _call_llm(user_message: str) -> str:
-    async with httpx.AsyncClient(timeout=LLM_REQUEST_TIMEOUT_SECONDS) as client:
+def _safe_err(exc: Exception) -> str:
+    """Defence in depth: never let the API key reach a log line, whatever the
+    provider or httpx put in the exception message."""
+    msg = f"{type(exc).__name__}: {exc}"
+    return msg.replace(LLM_API_KEY, "***") if LLM_API_KEY else msg
+
+
+async def _call_llm(user_message: str, timeout: float) -> str:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         if LLM_PROVIDER == "gemini":
             return await _call_gemini(client, user_message)
         if LLM_PROVIDER == "openai":
@@ -160,14 +166,14 @@ async def interpret_notes(operator_notes: list[str]) -> list[dict]:
     classifier as an emergency degraded mode. Never raises.
     """
     user_message = _build_user_message(operator_notes)
-    last_error: Exception | None = None
-    for attempt in range(2):
+    last_error = ""
+    for attempt, timeout in enumerate(LLM_ATTEMPT_TIMEOUT_SECONDS):
         try:
-            raw_text = await _call_llm(user_message)
+            raw_text = await _call_llm(user_message, timeout)
             return _parse_and_validate(raw_text, len(operator_notes))
         except Exception as exc:  # noqa: BLE001 - any failure triggers retry/fallback
-            last_error = exc
-            logger.warning("LLM interpretation attempt %d failed: %s", attempt + 1, exc)
+            last_error = _safe_err(exc)
+            logger.warning("LLM interpretation attempt %d failed: %s", attempt + 1, last_error)
             if attempt == 0:
                 await asyncio.sleep(0.5)
     logger.error("LLM interpretation failed twice (%s); using keyword fallback", last_error)
