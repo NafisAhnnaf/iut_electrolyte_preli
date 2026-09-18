@@ -198,6 +198,15 @@ def _restore_neutrality(scenario: ScenarioRequest, c: list[float], d: list[float
             return
 
 
+def _non_negative(x: float) -> float:
+    """Rounding can leave a zero-floor quantity at e.g. -2.2e-05 (seen with a battery
+    whose minimum is 0 and full-precision float inputs). HourPlan requires >= 0 and a
+    validation error there surfaces as HTTP 500, so snap such noise to 0. The threshold
+    is far inside the judge's 0.01 tolerance; anything larger is left alone so a real
+    bug still fails loudly in the validator instead of being hidden."""
+    return 0.0 if -1e-3 < x < 0 else x
+
+
 def _build_plan(scenario: ScenarioRequest, directives: Directives,
                 g: list[float], s: list[float],
                 c: list[float], d: list[float]) -> list[HourPlan]:
@@ -246,11 +255,11 @@ def _build_plan(scenario: ScenarioRequest, directives: Directives,
 
         plan.append(HourPlan(
             hour=h,
-            grid_kwh=grid,
-            solar_used_kwh=round(s[h], DP),
+            grid_kwh=_non_negative(grid),
+            solar_used_kwh=_non_negative(round(s[h], DP)),
             battery_action=action,
-            battery_kwh=round(amount, DP),
-            battery_energy_after_kwh=energy,
+            battery_kwh=_non_negative(round(amount, DP)),
+            battery_energy_after_kwh=_non_negative(energy),
         ))
     return plan
 

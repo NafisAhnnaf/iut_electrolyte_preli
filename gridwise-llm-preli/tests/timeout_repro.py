@@ -96,6 +96,9 @@ def run_drip() -> int:
 
     import httpx
 
+    # The service skips the LLM entirely when no key is configured, which would make
+    # this test pass vacuously -- force a (dummy) key so the network path is exercised.
+    os.environ["LLM_API_KEY"] = "dummy-not-a-real-key"
     sys.path.insert(0, str(ROOT))
     from app import interpreter  # noqa: E402
 

@@ -11,6 +11,7 @@ is coerced to a logged no_op for that one note.
 from __future__ import annotations
 
 import logging
+import math
 
 from app.schemas import Directives, DirectiveInterpretation
 
@@ -37,20 +38,66 @@ def _no_op(note_index: int, reason: str) -> DirectiveInterpretation:
     )
 
 
+def _as_int(x: object) -> int | None:
+    """Accept 18, 18.0 and "18" (LLM JSON output is not always strictly typed);
+    reject 18.5, booleans, NaN and anything non-numeric."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        return int(x) if math.isfinite(x) and x.is_integer() else None
+    if isinstance(x, str):
+        try:
+            return _as_int(float(x.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _as_number(x: object) -> float | None:
+    """Accept 60, 60.0, "60", "60%", "1,900"; reject booleans, NaN/inf and text."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        return float(x) if math.isfinite(x) else None
+    if isinstance(x, str):
+        cleaned = x.strip().replace(",", "").rstrip("%").strip()
+        try:
+            v = float(cleaned)
+        except ValueError:
+            return None
+        return v if math.isfinite(v) else None
+    return None
+
+
 def _window_hours(entry: dict) -> list[int] | None:
-    start, end = entry.get("start_hour"), entry.get("end_hour")
-    if not isinstance(start, int) or not isinstance(end, int):
+    """End-exclusive window -> ascending unique hours in 0..23.
+
+    A window that crosses midnight inside the single 24-hour schedule
+    ("10 PM to 2 AM" -> start 22, end 2) wraps to hours 22, 23, 0, 1 and is
+    returned ascending as [0, 1, 22, 23], as the spec requires ascending order.
+    """
+    start, end = _as_int(entry.get("start_hour")), _as_int(entry.get("end_hour"))
+    if start is None or end is None:
         return None
-    if not (0 <= start < end <= 24):
+    if start == 24:
+        start = 0
+    if not (0 <= start <= 23 and 0 <= end <= 24):
         return None
-    return list(range(start, end))
+    if start < end:
+        return list(range(start, end))
+    if end < start and end != 0:
+        return sorted(set(range(start, 24)) | set(range(0, end)))
+    if end == 0 and start > 0:        # "... until midnight" written as end 0
+        return list(range(start, 24))
+    return None                        # start == end: empty window
 
 
 def _solar_factor(entry: dict) -> float | None:
-    value, kind = entry.get("value"), entry.get("value_kind")
-    if not isinstance(value, (int, float)):
+    value, kind = _as_number(entry.get("value")), entry.get("value_kind")
+    if value is None:
         return None
-    value = float(value)
     if kind == "percent_remaining":
         factor = value / 100
     elif kind == "percent_reduced":
@@ -61,32 +108,40 @@ def _solar_factor(entry: dict) -> float | None:
         factor = 1 - value
     else:
         return None
+    if -1e-9 < factor < 0:             # float noise from 1 - 100/100 etc.
+        factor = 0.0
+    if 1 < factor < 1 + 1e-9:
+        factor = 1.0
     if not (0 <= factor <= 1):
         return None
     return factor
 
 
 def _reserve_kwh(entry: dict, capacity_kwh: float) -> float | None:
-    value, kind = entry.get("value"), entry.get("value_kind")
-    if not isinstance(value, (int, float)):
+    value, kind = _as_number(entry.get("value")), entry.get("value_kind")
+    if value is None:
         return None
-    value = float(value)
     if kind == "kwh":
         reserve = value
+    elif kind == "mwh":
+        reserve = value * 1000
     elif kind == "percent_of_capacity":
         reserve = value / 100 * capacity_kwh
     else:
         return None
-    if not (0 <= reserve <= capacity_kwh):
+    if not (0 <= reserve <= capacity_kwh + 1e-9):
         return None
-    return reserve
+    return min(reserve, capacity_kwh)
 
 
 def _grid_cap_kwh(entry: dict) -> float | None:
-    value = entry.get("value")
-    if not isinstance(value, (int, float)):
+    value, kind = _as_number(entry.get("value")), entry.get("value_kind")
+    if value is None:
         return None
-    value = float(value)
+    if kind == "mwh":
+        value *= 1000
+    elif kind not in ("kwh", None):
+        return None                    # a percentage is not a grid cap in kWh
     if value < 0:
         return None
     return value
