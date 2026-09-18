@@ -103,7 +103,7 @@ Expected result: a PASS table ending `.../... checks passed`, exit code 0. Addit
 
 
 1. Pull Image from registry `docker pull nfs996/iut-electrolyte-preli:v1`
-2. Run the image 'docker run -d --name gridwise-fallback -p 8000:8000 -e LLM_API_KEY=<your key> nfs996/iut-electrolyte-preli:v1'
+2. Run the image `docker run -d --name gridwise-fallback -p 8000:8000 -e LLM_API_KEY=<your key> nfs996/iut-electrolyte-preli:v1`
 3. Test Endpoint: `curl http://localhost:8000/health`
 4. Expected output:  `{"status":"ok"}`
 
