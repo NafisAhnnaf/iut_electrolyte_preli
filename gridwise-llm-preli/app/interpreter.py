@@ -15,11 +15,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
+import time
 
 import httpx
 
-from app.config import LLM_API_KEY, LLM_ATTEMPT_TIMEOUT_SECONDS, LLM_MODEL, LLM_PROVIDER
+from app.config import (
+    LLM_API_KEY,
+    LLM_ATTEMPT_TIMEOUT_SECONDS,
+    LLM_BACKOFF_BASE_SECONDS,
+    LLM_BACKOFF_MAX_SECONDS,
+    LLM_MODEL,
+    LLM_PROVIDER,
+    LLM_TOTAL_BUDGET_SECONDS,
+)
 
 logger = logging.getLogger("gridwise.interpreter")
 
@@ -159,11 +169,87 @@ def _parse_and_validate(raw_text: str, note_count: int) -> list[dict]:
     return [by_index[i] for i in range(note_count)]
 
 
+# --- Retry-delay extraction: use the provider's own rate-limit hints instead of
+# guessing with a fixed sleep. Falls back to exponential backoff with jitter when
+# the response gives no hint at all. -----------------------------------------
+
+_GO_DURATION_RE = re.compile(
+    r"(?:(?P<h>\d+(?:\.\d+)?)h)?(?:(?P<m>\d+(?:\.\d+)?)m)?(?:(?P<s>\d+(?:\.\d+)?)s)?"
+    r"(?:(?P<ms>\d+(?:\.\d+)?)ms)?$"
+)
+
+
+def _parse_duration(text: str) -> float | None:
+    """Parses Go-style durations ("31s", "9.397s", "1h42m14.4s", "500ms") as used
+    by Groq's x-ratelimit-reset-* headers and similar provider fields."""
+    text = text.strip()
+    m = _GO_DURATION_RE.fullmatch(text)
+    if not m or not any(m.groups()):
+        return None
+    parts = m.groupdict()
+    seconds = 0.0
+    if parts["h"]:
+        seconds += float(parts["h"]) * 3600
+    if parts["m"]:
+        seconds += float(parts["m"]) * 60
+    if parts["s"]:
+        seconds += float(parts["s"])
+    if parts["ms"]:
+        seconds += float(parts["ms"]) / 1000
+    return seconds if seconds > 0 else None
+
+
+def _retry_delay_seconds(exc: Exception) -> float | None:
+    """Best-effort extraction of a provider-suggested retry delay. Returns None if
+    the exception carries no usable hint (caller then uses backoff)."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+
+    retry_after = resp.headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass  # could be an HTTP-date; not worth parsing for this use case
+
+    # Groq-style: x-ratelimit-reset-requests / x-ratelimit-reset-tokens (Go duration
+    # strings). Either resource clearing is enough to plausibly succeed again, so
+    # take the smaller of the two when both are present.
+    candidates = []
+    for header in ("x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        raw = resp.headers.get(header)
+        if raw:
+            parsed = _parse_duration(raw)
+            if parsed is not None:
+                candidates.append(parsed)
+    if candidates:
+        return min(candidates)
+
+    # Gemini-style: JSON error body with a RetryInfo detail, e.g.
+    # {"error": {"details": [{"@type": ".../RetryInfo", "retryDelay": "31s"}]}}
+    try:
+        body = resp.json()
+        for detail in body.get("error", {}).get("details", []):
+            if "retryDelay" in detail:
+                parsed = _parse_duration(str(detail["retryDelay"]))
+                if parsed is not None:
+                    return parsed
+    except Exception:  # noqa: BLE001 - body may not be JSON at all
+        pass
+
+    return None
+
+
 async def interpret_notes(operator_notes: list[str]) -> list[dict]:
     """Returns one intermediate-field dict per note, in order.
 
-    Tries the real LLM (1 retry on failure), then falls back to a keyword
-    classifier as an emergency degraded mode. Never raises.
+    Tries the real LLM up to len(LLM_ATTEMPT_TIMEOUT_SECONDS) times, waiting
+    between attempts according to the provider's own rate-limit hint (Retry-After,
+    Groq's x-ratelimit-reset-* headers, or Gemini's RetryInfo.retryDelay) when one
+    is present, falling back to exponential backoff with jitter otherwise. Never
+    waits past the total wall-clock budget. Falls back to a keyword classifier as
+    an emergency degraded mode only if every attempt fails. Never raises.
     """
     if not LLM_API_KEY:
         logger.warning("LLM_API_KEY is not set; using keyword fallback")
@@ -171,16 +257,51 @@ async def interpret_notes(operator_notes: list[str]) -> list[dict]:
 
     user_message = _build_user_message(operator_notes)
     last_error = ""
-    for attempt, timeout in enumerate(LLM_ATTEMPT_TIMEOUT_SECONDS):
+    start = time.monotonic()
+    attempts = LLM_ATTEMPT_TIMEOUT_SECONDS
+
+    for attempt, timeout in enumerate(attempts):
+        elapsed = time.monotonic() - start
+        remaining = LLM_TOTAL_BUDGET_SECONDS - elapsed
+        if remaining < timeout:
+            timeout = remaining
+        if timeout <= 0.5:
+            logger.warning("LLM interpretation budget exhausted before attempt %d", attempt + 1)
+            break
+
         try:
             raw_text = await _call_llm(user_message, timeout)
             return _parse_and_validate(raw_text, len(operator_notes))
         except Exception as exc:  # noqa: BLE001 - any failure triggers retry/fallback
             last_error = _safe_err(exc)
             logger.warning("LLM interpretation attempt %d failed: %s", attempt + 1, last_error)
-            if attempt == 0:
-                await asyncio.sleep(0.5)
-    logger.error("LLM interpretation failed twice (%s); using keyword fallback", last_error)
+
+            if attempt == len(attempts) - 1:
+                break  # no more attempts left, skip the sleep and go to fallback
+
+            hinted = _retry_delay_seconds(exc)
+            if hinted is not None:
+                delay = hinted
+                source = "provider hint"
+            else:
+                delay = min(LLM_BACKOFF_MAX_SECONDS,
+                            LLM_BACKOFF_BASE_SECONDS * (2 ** attempt))
+                delay += random.uniform(0, delay * 0.25)  # jitter
+                source = "backoff"
+
+            elapsed = time.monotonic() - start
+            remaining = LLM_TOTAL_BUDGET_SECONDS - elapsed
+            next_timeout = attempts[attempt + 1]
+            sleep_for = max(0.0, min(delay, remaining - next_timeout))
+            if sleep_for <= 0:
+                logger.warning("no budget left to wait out a %s of %.1fs; giving up early",
+                                source, delay)
+                break
+            logger.info("waiting %.1fs before retry (%s: %.1fs)", sleep_for, source, delay)
+            await asyncio.sleep(sleep_for)
+
+    logger.error("LLM interpretation failed after %d attempt(s) (%s); using keyword fallback",
+                 attempt + 1, last_error)
     return _keyword_fallback(operator_notes)
 
 
